@@ -1,0 +1,445 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Eclipse Commentator SPA — S3 (SPA) + CloudFront.
+  Optionally configures a custom domain with ACM certificate (created in us-east-1) and Route 53 DNS.
+
+# ────────────────────────────────────────────────────────────────────────────
+# Parameters
+# ────────────────────────────────────────────────────────────────────────────
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: eclipse
+    Description: Prefix used for resource naming (lowercase, hyphens only)
+    AllowedPattern: "^[a-z][a-z0-9-]*$"
+
+  DomainName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional custom domain (e.g. eclipse.klp.keycore.cloud).
+      Leave empty to use the default CloudFront domain.
+
+  HostedZoneName:
+    Type: String
+    Default: klp.keycore.cloud
+    Description: >-
+      Route 53 hosted zone name. Must include trailing dot or not — template handles both.
+      Only used when DomainName is provided.
+
+# ────────────────────────────────────────────────────────────────────────────
+# Conditions
+# ────────────────────────────────────────────────────────────────────────────
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref DomainName, ""]]
+
+Resources:
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # S3 — Static SPA hosting
+  # ══════════════════════════════════════════════════════════════════════════
+
+  SpaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${StackPrefix}-spa-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SpaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SpaBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SpaBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                "AWS:SourceArn": !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # ACM — TLS certificate (us-east-1, via custom resource)
+  #
+  # CloudFront requires certificates in us-east-1. Since this stack may
+  # deploy to any region, a Lambda-backed custom resource creates and
+  # validates the certificate cross-region using the AWS SDK.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  CertificateLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: HasCustomDomain
+    Properties:
+      RoleName: !Sub "${StackPrefix}-cert-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AcmAndRoute53
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - acm:RequestCertificate
+                  - acm:DescribeCertificate
+                  - acm:DeleteCertificate
+                  - acm:AddTagsToCertificate
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:GetChange
+                Resource:
+                  - !Sub "arn:aws:route53:::hostedzone/*"
+                  - "arn:aws:route53:::change/*"
+              - Effect: Allow
+                Action:
+                  - route53:ListHostedZonesByName
+                Resource: "*"
+
+  CertificateFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasCustomDomain
+    Properties:
+      FunctionName: !Sub "${StackPrefix}-cert-manager"
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt CertificateLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          const {
+            ACMClient,
+            RequestCertificateCommand,
+            DescribeCertificateCommand,
+            DeleteCertificateCommand,
+          } = require("@aws-sdk/client-acm");
+          const {
+            Route53Client,
+            ChangeResourceRecordSetsCommand,
+            ListHostedZonesByNameCommand,
+          } = require("@aws-sdk/client-route-53");
+          const https = require("https");
+          const url = require("url");
+
+          const acm = new ACMClient({ region: "us-east-1" });
+          const r53 = new Route53Client({ region: "us-east-1" });
+
+          async function sendResponse(event, status, data) {
+            const body = JSON.stringify({
+              Status: status,
+              Reason: data.Reason || "",
+              PhysicalResourceId: data.PhysicalResourceId || event.LogicalResourceId,
+              StackId: event.StackId,
+              RequestId: event.RequestId,
+              LogicalResourceId: event.LogicalResourceId,
+              Data: data.Data || {},
+            });
+            const parsed = new url.URL(event.ResponseURL);
+            return new Promise((resolve, reject) => {
+              const req = https.request(
+                {
+                  hostname: parsed.hostname,
+                  path: parsed.pathname + parsed.search,
+                  method: "PUT",
+                  headers: { "Content-Type": "", "Content-Length": body.length },
+                },
+                resolve
+              );
+              req.on("error", reject);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          function sleep(ms) {
+            return new Promise((r) => setTimeout(r, ms));
+          }
+
+          async function findHostedZoneId(zoneName) {
+            const name = zoneName.endsWith(".") ? zoneName : zoneName + ".";
+            const res = await r53.send(
+              new ListHostedZonesByNameCommand({ DNSName: name, MaxItems: "1" })
+            );
+            const zone = (res.HostedZones || []).find(
+              (z) => z.Name === name
+            );
+            if (!zone) throw new Error("Hosted zone not found: " + zoneName);
+            return zone.Id.replace("/hostedzone/", "");
+          }
+
+          async function waitForValidationRecords(certArn) {
+            for (let i = 0; i < 30; i++) {
+              const desc = await acm.send(
+                new DescribeCertificateCommand({ CertificateArn: certArn })
+              );
+              const opts = desc.Certificate.DomainValidationOptions || [];
+              const rec = opts[0] && opts[0].ResourceRecord;
+              if (rec && rec.Name && rec.Value) return rec;
+              await sleep(5000);
+            }
+            throw new Error("Timed out waiting for DNS validation records");
+          }
+
+          async function waitForIssued(certArn) {
+            for (let i = 0; i < 60; i++) {
+              const desc = await acm.send(
+                new DescribeCertificateCommand({ CertificateArn: certArn })
+              );
+              const status = desc.Certificate.Status;
+              if (status === "ISSUED") return;
+              if (status === "FAILED") throw new Error("Certificate validation failed");
+              await sleep(10000);
+            }
+            throw new Error("Timed out waiting for certificate to be issued");
+          }
+
+          exports.handler = async (event) => {
+            console.log("Event:", JSON.stringify(event));
+            try {
+              const props = event.ResourceProperties;
+              const domainName = props.DomainName;
+              const hostedZoneName = props.HostedZoneName;
+
+              if (event.RequestType === "Delete") {
+                const certArn = event.PhysicalResourceId;
+                if (certArn && certArn.startsWith("arn:aws:acm:")) {
+                  // Clean up DNS validation record before deleting cert
+                  try {
+                    const desc = await acm.send(
+                      new DescribeCertificateCommand({ CertificateArn: certArn })
+                    );
+                    const opts = desc.Certificate.DomainValidationOptions || [];
+                    const rec = opts[0] && opts[0].ResourceRecord;
+                    if (rec) {
+                      const zoneId = await findHostedZoneId(hostedZoneName);
+                      await r53.send(
+                        new ChangeResourceRecordSetsCommand({
+                          HostedZoneId: zoneId,
+                          ChangeBatch: {
+                            Changes: [
+                              {
+                                Action: "DELETE",
+                                ResourceRecordSet: {
+                                  Name: rec.Name,
+                                  Type: rec.Type,
+                                  TTL: 300,
+                                  ResourceRecords: [{ Value: rec.Value }],
+                                },
+                              },
+                            ],
+                          },
+                        })
+                      );
+                    }
+                  } catch (e) {
+                    console.log("DNS cleanup warning (non-fatal):", e.message);
+                  }
+                  await acm.send(
+                    new DeleteCertificateCommand({ CertificateArn: certArn })
+                  );
+                }
+                return sendResponse(event, "SUCCESS", {
+                  PhysicalResourceId: certArn,
+                });
+              }
+
+              // Create or Update — request a new certificate
+              const res = await acm.send(
+                new RequestCertificateCommand({
+                  DomainName: domainName,
+                  ValidationMethod: "DNS",
+                })
+              );
+              const certArn = res.CertificateArn;
+
+              // Wait for ACM to provide the DNS validation record
+              const dnsRecord = await waitForValidationRecords(certArn);
+
+              // Create the validation CNAME in Route 53
+              const zoneId = await findHostedZoneId(hostedZoneName);
+              await r53.send(
+                new ChangeResourceRecordSetsCommand({
+                  HostedZoneId: zoneId,
+                  ChangeBatch: {
+                    Changes: [
+                      {
+                        Action: "UPSERT",
+                        ResourceRecordSet: {
+                          Name: dnsRecord.Name,
+                          Type: dnsRecord.Type,
+                          TTL: 300,
+                          ResourceRecords: [{ Value: dnsRecord.Value }],
+                        },
+                      },
+                    ],
+                  },
+                })
+              );
+
+              // Wait for the certificate to be issued
+              await waitForIssued(certArn);
+
+              return sendResponse(event, "SUCCESS", {
+                PhysicalResourceId: certArn,
+                Data: { CertificateArn: certArn },
+              });
+            } catch (err) {
+              console.error("Error:", err);
+              return sendResponse(event, "FAILED", {
+                Reason: err.message,
+                PhysicalResourceId:
+                  event.PhysicalResourceId || event.LogicalResourceId,
+              });
+            }
+          };
+
+  Certificate:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: HasCustomDomain
+    Properties:
+      ServiceToken: !GetAtt CertificateFunction.Arn
+      DomainName: !Ref DomainName
+      HostedZoneName: !Ref HostedZoneName
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # CloudFront — Distribution with S3 origin
+  # ══════════════════════════════════════════════════════════════════════════
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${StackPrefix}-s3-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${StackPrefix} — Eclipse Commentator SPA"
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+
+        Aliases: !If
+          - HasCustomDomain
+          - - !Ref DomainName
+          - !Ref "AWS::NoValue"
+
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !GetAtt Certificate.CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+
+        # ── Origins ──────────────────────────────────────────────────────
+        Origins:
+          # S3 origin (static SPA files)
+          - Id: S3Origin
+            DomainName: !GetAtt SpaBucket.RegionalDomainName
+            OriginAccessControlId: !Ref OriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+
+        # ── Default cache behavior → S3 (cache static assets) ────────────
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6"   # CachingOptimized
+          Compress: true
+
+        # ── Custom error pages (SPA routing) ─────────────────────────────
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # Route 53 — DNS records pointing to CloudFront
+  # ══════════════════════════════════════════════════════════════════════════
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasCustomDomain
+    Properties:
+      HostedZoneName: !Sub
+        - "${Zone}."
+        - Zone: !Ref HostedZoneName
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        EvaluateTargetHealth: false
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront's fixed global hosted zone ID
+
+  DnsRecordIPv6:
+    Type: AWS::Route53::RecordSet
+    Condition: HasCustomDomain
+    Properties:
+      HostedZoneName: !Sub
+        - "${Zone}."
+        - Zone: !Ref HostedZoneName
+      Name: !Ref DomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        EvaluateTargetHealth: false
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront's fixed global hosted zone ID
+
+# ────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ────────────────────────────────────────────────────────────────────────────
+Outputs:
+  CloudFrontUrl:
+    Description: Eclipse SPA URL (CloudFront domain)
+    Value: !Sub "https://${Distribution.DomainName}"
+
+  DashboardUrl:
+    Condition: HasCustomDomain
+    Description: Eclipse SPA URL (custom domain)
+    Value: !Sub "https://${DomainName}"
+
+  CloudFrontDistributionId:
+    Description: Distribution ID (for cache invalidation)
+    Value: !Ref Distribution
+
+  SpaBucketName:
+    Description: S3 bucket for uploading eclipse.html
+    Value: !Ref SpaBucket
+
+  CertificateArnOutput:
+    Condition: HasCustomDomain
+    Description: ACM certificate ARN (us-east-1)
+    Value: !GetAtt Certificate.CertificateArn
