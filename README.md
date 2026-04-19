@@ -20,6 +20,8 @@ The app works like a sports commentator: it automatically announces each phase o
 
 Contact times computed from NASA Besselian elements for the specific observation coordinates.
 
+Main reference: [timeanddate.com eclipse page for Antoñán del Valle](https://www.timeanddate.com/eclipse/in/@3129949?iso=20260812)
+
 ## Features
 
 - **36 timestamped events** covering: pre-eclipse warmup (30 min before C1), partial ingress phases, totality approach, second contact / diamond ring / chromosphere / corona / Baily's beads / maximum / third contact, partial egress, sunset, and fourth contact
