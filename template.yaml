@@ -17,12 +17,12 @@ Parameters:
     Type: String
     Default: ""
     Description: >-
-      Optional custom domain (e.g. eclipse.klp.keycore.cloud).
+      Optional custom domain (e.g. eclipse.eclipse.lang.dk).
       Leave empty to use the default CloudFront domain.
 
   HostedZoneName:
     Type: String
-    Default: klp.keycore.cloud
+    Default: eclipse.lang.dk
     Description: >-
       Route 53 hosted zone name. Must include trailing dot or not — template handles both.
       Only used when DomainName is provided.

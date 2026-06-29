@@ -6,15 +6,15 @@ set -euo pipefail
 #
 # Usage:
 #   ./deploy.sh                                    # deploy without custom domain
-#   ./deploy.sh my-stack us-west-2 production      # custom stack, region, profile
+#   ./deploy.sh my-stack eu-west-1 production      # custom stack, region, profile
 #
 # Environment variables (optional):
-#   DOMAIN_NAME      — custom domain (e.g. eclipse.klp.keycore.cloud)
-#   HOSTED_ZONE_NAME — Route 53 hosted zone (default: klp.keycore.cloud)
+#   DOMAIN_NAME      — custom domain (e.g. eclipse.lang.dk)
+#   HOSTED_ZONE_NAME — Route 53 hosted zone (default: eclipse.lang.dk)
 #
 # Examples:
 #   # Deploy with custom domain (uses default hosted zone)
-#   DOMAIN_NAME=eclipse.klp.keycore.cloud ./deploy.sh
+#   DOMAIN_NAME=eclipse.lang.dk ./deploy.sh
 #
 #   # Deploy with custom domain and explicit hosted zone
 #   DOMAIN_NAME=eclipse.example.com HOSTED_ZONE_NAME=example.com ./deploy.sh
@@ -29,7 +29,7 @@ STACK_NAME="${1:-eclipse}"
 REGION="${2:-eu-west-1}"
 PROFILE="${3:-sandbox}"
 DOMAIN_NAME="${DOMAIN_NAME:-}"
-HOSTED_ZONE_NAME="${HOSTED_ZONE_NAME:-klp.keycore.cloud}"
+HOSTED_ZONE_NAME="${HOSTED_ZONE_NAME:-eclipse.lang.dk}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/template.yaml"
 SPA_FILE="${SCRIPT_DIR}/eclipse.html"
