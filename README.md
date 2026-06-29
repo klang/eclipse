@@ -81,7 +81,7 @@ Defaults: stack name `eclipse`, region `eu-west-1`, profile `sandbox`.
 ### Deploy with custom domain
 
 ```bash
-DOMAIN_NAME=eclipse.eclipse.lang.dk ./deploy.sh
+DOMAIN_NAME=eclipse.lang.dk ./deploy.sh
 ```
 
 The deploy script will:
