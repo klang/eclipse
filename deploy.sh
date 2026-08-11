@@ -28,7 +28,7 @@ set -euo pipefail
 STACK_NAME="${1:-eclipse}"
 REGION="${2:-eu-west-1}"
 PROFILE="${3:-sandbox}"
-DOMAIN_NAME="${DOMAIN_NAME:-}"
+DOMAIN_NAME="${DOMAIN_NAME:-lang.dk}"
 HOSTED_ZONE_NAME="${HOSTED_ZONE_NAME:-eclipse.lang.dk}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/template.yaml"
